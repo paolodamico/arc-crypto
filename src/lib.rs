@@ -1,3 +1,4 @@
+pub mod error;
 pub mod hash;
 
 /// ARC ciphersuite context string for P-256.
