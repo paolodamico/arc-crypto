@@ -1,0 +1,39 @@
+[package]
+name = "arc-crypto"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = []
+client = []
+
+[dependencies]
+elliptic-curve = { version = "0.13", features = ["hash2curve"] }
+p256 = { version = "0.13", features = ["arithmetic", "hash2curve"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+sha2 = { version = "0.10", default-features = false }
+sha3 = { version = "0.10", default-features = false }
+thiserror = "2"
+zeroize = { version = "1.8.2", features = ["derive"] }
+
+[dev-dependencies]
+rand_core = { version = "0.6", features = ["getrandom"] }
+
+[lints.clippy]
+pedantic = { level = "deny", priority = -1 }
+unwrap_used = "deny"
+expect_used = "warn"
+panic = "deny"
+panic_in_result_fn = "deny"
+unimplemented = "deny"
+allow_attributes = "deny"
+dbg_macro = "deny"
+todo = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+await_holding_lock = "deny"
+large_futures = "deny"
+exit = "deny"
+mem_forget = "deny"
+module_name_repetitions = "allow"
+similar_names = "allow"
