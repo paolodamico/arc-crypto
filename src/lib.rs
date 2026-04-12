@@ -1,6 +1,10 @@
 pub mod error;
 pub mod generators;
 pub mod hash;
+pub mod types;
+
+#[cfg(feature = "client")]
+pub mod client;
 
 /// ARC ciphersuite context string for P-256.
 ///
