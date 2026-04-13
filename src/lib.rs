@@ -1,4 +1,5 @@
 pub mod error;
+pub mod fiat_shamir;
 pub mod generators;
 pub mod hash;
 pub mod types;
@@ -6,8 +7,8 @@ pub mod types;
 #[cfg(feature = "client")]
 pub mod client;
 
-#[cfg(any(test, feature = "test-utils"))]
-pub mod seeded_prng;
+#[cfg(feature = "server")]
+pub mod server;
 
 /// ARC ciphersuite context string for P-256.
 ///

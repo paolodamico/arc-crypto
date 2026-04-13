@@ -40,6 +40,7 @@ pub fn generator_h() -> &'static ProjectivePoint {
 
 #[cfg(test)]
 mod tests {
+    use crate::types::serialize_element;
     use elliptic_curve::group::GroupEncoding;
     use p256::ProjectivePoint;
 
@@ -62,8 +63,10 @@ mod tests {
 
     #[test]
     fn generator_h_is_deterministic() {
-        let h1 = generator_h();
-        let h2 = generator_h();
-        assert_eq!(h1.to_bytes(), h2.to_bytes());
+        let h = generator_h();
+        assert_eq!(
+            hex::encode(serialize_element(h)),
+            "022d47ce5f78092b3e2b057228f47692d54fb6b554b1c1b1d5c93ee383b78483db"
+        );
     }
 }

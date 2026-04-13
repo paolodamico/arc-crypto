@@ -1,16 +1,13 @@
-mod proof;
-
 use elliptic_curve::Field;
-use p256::Scalar;
-use rand_core::CryptoRngCore;
+use p256::{ProjectivePoint, Scalar};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
+use crate::CONTEXT_STRING;
 use crate::error::Error;
+use crate::fiat_shamir::NISchnorrProofShake128P256;
 use crate::generators::{generator_g, generator_h};
 use crate::hash::hash_to_scalar;
 use crate::types::{CredentialRequest, RequestProof};
-
-use self::proof::compute_challenge;
 
 /// Client secrets generated during credential request creation.
 ///
@@ -60,37 +57,20 @@ impl CredentialRequest {
     ///
     /// Returns `Error::HashToScalar` if deriving `m2` from the request context
     /// fails.
-    pub fn generate(
+    pub fn generate<R: rand_core::CryptoRng + rand_core::RngCore>(
         request_context: &[u8],
-        rng: &mut impl CryptoRngCore,
+        rng: &mut R,
     ) -> Result<(ClientSecrets, Self), Error> {
         let g = generator_g();
         let h = *generator_h();
 
         let secrets = ClientSecrets::from_request_context(&mut *rng, request_context)?;
 
+        // Encrypt m1 and m2 secrets
         let m1_enc = g * secrets.m1 + h * secrets.r1;
         let m2_enc = g * secrets.m2 + h * secrets.r2;
 
-        let k1 = Scalar::random(&mut *rng);
-        let k2 = Scalar::random(&mut *rng);
-        let k3 = Scalar::random(&mut *rng);
-        let k4 = Scalar::random(&mut *rng);
-
-        let r1_commit = g * k1 + h * k3;
-        let r2_commit = g * k2 + h * k4;
-
-        let c = compute_challenge(&m1_enc, &m2_enc, &r1_commit, &r2_commit);
-
-        let proof = RequestProof {
-            challenge: c,
-            responses: [
-                k1 + c * secrets.m1,
-                k2 + c * secrets.m2,
-                k3 + c * secrets.r1,
-                k4 + c * secrets.r2,
-            ],
-        };
+        let proof = RequestProof::from_request_commitments(&secrets, &m1_enc, &m2_enc, rng);
 
         Ok((
             secrets,
@@ -101,28 +81,56 @@ impl CredentialRequest {
             },
         ))
     }
+}
 
-    /// Verify the credential request's proof of knowledge.
+impl RequestProof {
+    /// Equivalent to `MakeCredentialRequestProof`
     ///
-    /// Reconstructs the prover commitments from the proof and checks
-    /// that the Fiat-Shamir challenge matches.
-    #[must_use]
-    pub fn verify_proof(&self) -> bool {
+    /// Compute the Fiat-Shamir challenge for a credential request proof.
+    ///
+    /// Transcript: `session_id || G || H || m1Enc || m2Enc || A1 || A2`
+    fn from_request_commitments<R: rand_core::CryptoRng + rand_core::RngCore>(
+        secrets: &ClientSecrets,
+        m1_enc: &ProjectivePoint,
+        m2_enc: &ProjectivePoint,
+        rng: &mut R,
+    ) -> Self {
         let g = generator_g();
         let h = *generator_h();
-        let [s1, s2, s3, s4] = self.proof.responses;
-        let c = self.proof.challenge;
 
-        let r1_commit = g * s1 + h * s3 - self.m1_enc * c;
-        let r2_commit = g * s2 + h * s4 - self.m2_enc * c;
+        // Random masks
+        let k1 = Scalar::random(&mut *rng); // m1_var
+        let k2 = Scalar::random(&mut *rng); // m2_var
+        let k3 = Scalar::random(&mut *rng); // r1_var
+        let k4 = Scalar::random(&mut *rng); // r2_var
 
-        let c_prime = compute_challenge(&self.m1_enc, &self.m2_enc, &r1_commit, &r2_commit);
-        c == c_prime
+        // Schnorr internal commitments
+        let r1_commit = g * k1 + h * k3;
+        let r2_commit = g * k2 + h * k4;
+
+        let mut sid = Vec::with_capacity(CONTEXT_STRING.len() + 17);
+        sid.extend_from_slice(CONTEXT_STRING);
+        sid.extend_from_slice(b"CredentialRequest");
+
+        let statement = vec![g, h, *m1_enc, *m2_enc];
+
+        let prover = NISchnorrProofShake128P256::new(sid, statement);
+        let c = prover.into_challenge(&[r1_commit, r2_commit]);
+
+        Self {
+            challenge: c,
+            responses: [
+                k1 + c * secrets.m1,
+                k2 + c * secrets.m2,
+                k3 + c * secrets.r1,
+                k4 + c * secrets.r2,
+            ],
+        }
     }
 }
 
 #[cfg(test)]
-#[expect(clippy::expect_used, reason = "tests use expect for clarity")]
+#[expect(clippy::expect_used, reason = "tests")]
 mod tests {
     use elliptic_curve::Field;
     use p256::{ProjectivePoint, Scalar};
