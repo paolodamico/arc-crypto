@@ -5,9 +5,11 @@ use p256::Scalar;
 use rand_core::CryptoRngCore;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
+use crate::CONTEXT_STRING;
 use crate::error::Error;
+use crate::fiat_shamir::NISchnorrProofShake128P256;
 use crate::generators::{generator_g, generator_h};
-use crate::types::{CredentialRequest, CredentialResponse, ServerPublicKey};
+use crate::types::{CredentialRequest, CredentialResponse, ResponseProof, ServerPublicKey};
 
 /// Server's private key for credential issuance.
 ///
@@ -57,6 +59,48 @@ impl ServerPrivateKey {
     }
 }
 
+impl ServerPrivateKey {
+    /// Construct from explicit scalars.
+    ///
+    /// Use this to restore a persisted key or for test vectors.
+    #[must_use]
+    pub fn from_scalars(x0: Scalar, x1: Scalar, x2: Scalar, x0_blinding: Scalar) -> Self {
+        Self {
+            x0,
+            x1,
+            x2,
+            x0_blinding,
+        }
+    }
+}
+
+impl CredentialRequest {
+    /// Verify the credential request's proof of knowledge.
+    ///
+    /// Called by the server before issuing a credential response.
+    ///
+    /// Reference: <https://ietf-wg-privacypass.github.io/draft-arc/draft-ietf-privacypass-arc-crypto.html#name-credential-request-verify>
+    #[must_use]
+    pub fn verify_proof(&self) -> bool {
+        let g = generator_g();
+        let h = *generator_h();
+        let [s1, s2, s3, s4] = self.proof.responses;
+        let c = self.proof.challenge;
+
+        let r1_commit = g * s1 + h * s3 - self.m1_enc * c;
+        let r2_commit = g * s2 + h * s4 - self.m2_enc * c;
+
+        let mut sid = Vec::with_capacity(CONTEXT_STRING.len() + 17);
+        sid.extend_from_slice(CONTEXT_STRING);
+        sid.extend_from_slice(b"CredentialRequest");
+
+        let statement = vec![g, h, self.m1_enc, self.m2_enc];
+        let verifier = NISchnorrProofShake128P256::new(sid, statement);
+        let c_prime = verifier.into_challenge(&[r1_commit, r2_commit]);
+        c == c_prime
+    }
+}
+
 impl CredentialResponse {
     /// Create a credential response for the given request.
     ///
@@ -96,7 +140,7 @@ impl CredentialResponse {
         let t2 = b * private_key.x2;
 
         let response_points = [u, enc_u_prime, x0_aux, x1_aux, x2_aux, h_aux];
-        let response_proof = proof::make_response_proof(
+        let response_proof = ResponseProof::from_issuance(
             private_key,
             &public_key,
             request,

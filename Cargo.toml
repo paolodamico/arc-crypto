@@ -4,10 +4,11 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-default = []
+default = ["serde"]
 client = []
 server = []
 serde = ["dep:serde", "p256/serde"]
+test-utils = ["client", "server"]
 
 [dependencies]
 elliptic-curve = { version = "0.13", features = ["hash2curve"] }

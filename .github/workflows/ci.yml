@@ -21,8 +21,7 @@ env:
 jobs:
   lint:
     name: Format and Clippy
-    runs-on:
-      group: ubuntu-latest
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout code
@@ -44,8 +43,7 @@ jobs:
 
   test:
     name: Test
-    runs-on:
-      group: ubuntu-latest
+    runs-on: ubuntu-latest
     strategy:
       matrix:
         toolchain:
@@ -59,7 +57,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: ${{ strategy.matrix.toolchain }}
+          toolchain: ${{ matrix.toolchain }}
 
       - name: Cache Cargo dependencies
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1 https://github.com/Swatinem/rust-cache/releases/tag/v2.9.1

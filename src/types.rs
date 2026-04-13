@@ -3,10 +3,7 @@ use elliptic_curve::group::GroupEncoding;
 use elliptic_curve::sec1::FromEncodedPoint;
 use p256::{AffinePoint, EncodedPoint, ProjectivePoint, Scalar};
 
-use crate::CONTEXT_STRING;
 use crate::error::Error;
-use crate::fiat_shamir::NISchnorrProofShake128P256;
-use crate::generators::{generator_g, generator_h};
 
 /// Serde helper for `ProjectivePoint` via compressed SEC1 encoding.
 ///
@@ -134,7 +131,11 @@ impl CredentialRequest {
 }
 
 /// Deserialize a compressed SEC1-encoded P-256 point.
-pub(crate) fn deserialize_element(bytes: &[u8]) -> Result<ProjectivePoint, Error> {
+///
+/// # Errors
+///
+/// Returns `Error::InvalidPoint` if the encoding is invalid.
+pub fn deserialize_element(bytes: &[u8]) -> Result<ProjectivePoint, Error> {
     let encoded = EncodedPoint::from_bytes(bytes).map_err(|_| Error::InvalidPoint)?;
     let affine: Option<AffinePoint> = AffinePoint::from_encoded_point(&encoded).into();
     let Some(affine) = affine else {
@@ -144,7 +145,12 @@ pub(crate) fn deserialize_element(bytes: &[u8]) -> Result<ProjectivePoint, Error
 }
 
 /// Deserialize a big-endian scalar, rejecting values outside the field.
-pub(crate) fn deserialize_scalar(bytes: &[u8]) -> Result<Scalar, Error> {
+///
+/// # Errors
+///
+/// Returns `Error::InvalidScalar` if the value is outside the P-256
+/// field or has the wrong length.
+pub fn deserialize_scalar(bytes: &[u8]) -> Result<Scalar, Error> {
     let bytes: &[u8; SCALAR_SIZE] = bytes.try_into().map_err(|_| Error::InvalidScalar)?;
     let field_bytes = p256::FieldBytes::from(*bytes);
     let scalar: Option<Scalar> = Scalar::from_repr(field_bytes).into();
@@ -312,92 +318,48 @@ impl CredentialResponse {
     }
 }
 
-impl CredentialRequest {
-    /// Verify the credential request's proof of knowledge.
-    ///
-    /// Reconstructs the prover commitments from the proof and checks
-    /// that the Fiat-Shamir challenge matches.
-    ///
-    /// Reference: <https://ietf-wg-privacypass.github.io/draft-arc/draft-ietf-privacypass-arc-crypto.html#name-credential-request-verify>
-    #[must_use]
-    pub fn verify_proof(&self) -> bool {
-        let g = generator_g();
-        let h = *generator_h();
-        let [s1, s2, s3, s4] = self.proof.responses;
-        let c = self.proof.challenge;
+/// Size of a serialized `Credential`: 1 scalar + 3 elements.
+pub const CREDENTIAL_SIZE: usize = SCALAR_SIZE + 3 * ELEMENT_SIZE;
 
-        let r1_commit = g * s1 + h * s3 - self.m1_enc * c;
-        let r2_commit = g * s2 + h * s4 - self.m2_enc * c;
-
-        let mut sid = Vec::with_capacity(CONTEXT_STRING.len() + 17);
-        sid.extend_from_slice(CONTEXT_STRING);
-        sid.extend_from_slice(b"CredentialRequest");
-
-        let statement = vec![g, h, self.m1_enc, self.m2_enc];
-        let verifier = NISchnorrProofShake128P256::new(sid, statement);
-        let c_prime = verifier.into_challenge(&[r1_commit, r2_commit]);
-        c == c_prime
-    }
+/// A finalized credential held by the client after issuance.
+///
+/// Wire format: `m1[32] || U[33] || U_prime[33] || X1[33]`
+///
+/// Reference: <https://ietf-wg-privacypass.github.io/draft-arc/draft-ietf-privacypass-arc-crypto.html#name-credential-finalization>
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct Credential {
+    pub m1: Scalar,
+    #[cfg_attr(feature = "serde", serde(with = "point_serde"))]
+    pub u: ProjectivePoint,
+    #[cfg_attr(feature = "serde", serde(with = "point_serde"))]
+    pub u_prime: ProjectivePoint,
+    #[cfg_attr(feature = "serde", serde(with = "point_serde"))]
+    pub x1: ProjectivePoint,
 }
 
-impl CredentialResponse {
-    /// Verify the credential response proof against the server's public key.
-    ///
-    /// Reconstructs the prover announcements from the proof responses and
-    /// checks that the Fiat-Shamir challenge matches.
-    ///
-    /// Reference: <https://ietf-wg-privacypass.github.io/draft-arc/draft-ietf-privacypass-arc-crypto.html#name-credential-response-verify>
+impl Credential {
     #[must_use]
-    pub fn verify_proof(
-        &self,
-        public_key: &ServerPublicKey,
-        request: &CredentialRequest,
-    ) -> bool {
-        let g = generator_g();
-        let h = *generator_h();
-        let [s0, s1, s2, s3, s4, s5, s6] = self.proof.responses;
-        let c = self.proof.challenge;
+    pub fn to_bytes(&self) -> [u8; CREDENTIAL_SIZE] {
+        let mut buf = [0u8; CREDENTIAL_SIZE];
+        buf[..SCALAR_SIZE].copy_from_slice(&self.m1.to_repr());
+        buf[SCALAR_SIZE..SCALAR_SIZE + ELEMENT_SIZE].copy_from_slice(&serialize_element(&self.u));
+        buf[SCALAR_SIZE + ELEMENT_SIZE..SCALAR_SIZE + 2 * ELEMENT_SIZE]
+            .copy_from_slice(&serialize_element(&self.u_prime));
+        buf[SCALAR_SIZE + 2 * ELEMENT_SIZE..].copy_from_slice(&serialize_element(&self.x1));
+        buf
+    }
 
-        // Reconstruct 11 announcements from responses
-        let announcements = [
-            g * s0 + h * s3 - public_key.x0 * c,
-            h * s1 - public_key.x1 * c,
-            h * s2 - public_key.x2 * c,
-            h * s4 - self.h_aux * c,
-            self.h_aux * s3 - self.x0_aux * c,
-            h * s5 - self.x1_aux * c,
-            public_key.x1 * s4 - self.x1_aux * c,
-            public_key.x2 * s4 - self.x2_aux * c,
-            h * s6 - self.x2_aux * c,
-            g * s4 - self.u * c,
-            public_key.x0 * s4 + request.m1_enc * s5
-                + request.m2_enc * s6
-                - self.enc_u_prime * c,
-        ];
-
-        let mut sid = Vec::with_capacity(CONTEXT_STRING.len() + 18);
-        sid.extend_from_slice(CONTEXT_STRING);
-        sid.extend_from_slice(b"CredentialResponse");
-
-        let statement = vec![
-            g,
-            h,
-            request.m1_enc,
-            request.m2_enc,
-            self.u,
-            self.enc_u_prime,
-            public_key.x0,
-            public_key.x1,
-            public_key.x2,
-            self.x0_aux,
-            self.x1_aux,
-            self.x2_aux,
-            self.h_aux,
-        ];
-
-        let verifier = NISchnorrProofShake128P256::new(sid, statement);
-        let c_prime = verifier.into_challenge(&announcements);
-        c == c_prime
+    /// # Errors
+    ///
+    /// Returns an error if scalar or point deserialization fails.
+    pub fn from_bytes(bytes: &[u8; CREDENTIAL_SIZE]) -> Result<Self, Error> {
+        let m1 = deserialize_scalar(&bytes[..SCALAR_SIZE])?;
+        let u = deserialize_element(&bytes[SCALAR_SIZE..SCALAR_SIZE + ELEMENT_SIZE])?;
+        let u_prime = deserialize_element(
+            &bytes[SCALAR_SIZE + ELEMENT_SIZE..SCALAR_SIZE + 2 * ELEMENT_SIZE],
+        )?;
+        let x1 = deserialize_element(&bytes[SCALAR_SIZE + 2 * ELEMENT_SIZE..])?;
+        Ok(Self { m1, u, u_prime, x1 })
     }
 }
 
@@ -466,10 +428,11 @@ mod tests {
 #[expect(clippy::expect_used, reason = "tests use expect for clarity")]
 mod serde_tests {
     use elliptic_curve::Field;
+    use elliptic_curve::PrimeField;
     use p256::{ProjectivePoint, Scalar};
     use rand_core::OsRng;
 
-    use super::{CredentialRequest, RequestProof};
+    use super::*;
 
     fn random_request() -> CredentialRequest {
         CredentialRequest {
@@ -488,31 +451,106 @@ mod serde_tests {
     }
 
     #[test]
-    fn credential_request_json_roundtrip() {
-        let request = random_request();
-        let json = serde_json::to_string(&request).expect("serialize should succeed");
-        let recovered: CredentialRequest =
-            serde_json::from_str(&json).expect("deserialize should succeed");
+    fn scalar_serializes_as_hex() {
+        let proof = RequestProof {
+            challenge: Scalar::random(&mut OsRng),
+            responses: std::array::from_fn(|_| Scalar::random(&mut OsRng)),
+        };
+        let json = serde_json::to_string(&proof).expect("serialize should succeed");
+        let v: serde_json::Value = serde_json::from_str(&json).expect("parse JSON");
 
-        assert_eq!(request.to_bytes(), recovered.to_bytes());
+        // Challenge: 32-byte hex → 64 hex chars
+        let c_str = v["challenge"].as_str().expect("string");
+        assert_eq!(c_str.len(), 64);
+        assert_eq!(
+            hex::decode(c_str).expect("valid hex"),
+            &proof.challenge.to_repr()[..],
+        );
+    }
+
+    #[test]
+    fn point_serializes_as_hex_string() {
+        let pk = ServerPublicKey {
+            x0: ProjectivePoint::GENERATOR,
+            x1: ProjectivePoint::GENERATOR * Scalar::random(&mut OsRng),
+            x2: ProjectivePoint::GENERATOR * Scalar::random(&mut OsRng),
+        };
+        let json = serde_json::to_string(&pk).expect("serialize should succeed");
+        let v: serde_json::Value = serde_json::from_str(&json).expect("parse JSON");
+
+        // Points serialize as hex strings (via p256::PublicKey serde)
+        let x0_str = v["x0"].as_str().expect("string");
+        hex::decode(x0_str).expect("valid hex");
+
+        // Roundtrip preserves the point value
+        let recovered: ServerPublicKey = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(pk.to_bytes(), recovered.to_bytes());
     }
 
     #[test]
     fn request_proof_json_roundtrip() {
         let proof = RequestProof {
             challenge: Scalar::random(&mut OsRng),
-            responses: [
-                Scalar::random(&mut OsRng),
-                Scalar::random(&mut OsRng),
-                Scalar::random(&mut OsRng),
-                Scalar::random(&mut OsRng),
-            ],
+            responses: std::array::from_fn(|_| Scalar::random(&mut OsRng)),
         };
-        let json = serde_json::to_string(&proof).expect("serialize should succeed");
-        let recovered: RequestProof =
-            serde_json::from_str(&json).expect("deserialize should succeed");
-
+        let json = serde_json::to_string(&proof).expect("serialize");
+        let recovered: RequestProof = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(proof.challenge, recovered.challenge);
         assert_eq!(proof.responses, recovered.responses);
+    }
+
+    #[test]
+    fn response_proof_json_roundtrip() {
+        let proof = ResponseProof {
+            challenge: Scalar::random(&mut OsRng),
+            responses: std::array::from_fn(|_| Scalar::random(&mut OsRng)),
+        };
+        let json = serde_json::to_string(&proof).expect("serialize");
+        let recovered: ResponseProof = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(proof.to_bytes(), recovered.to_bytes());
+    }
+
+    #[test]
+    fn credential_request_json_roundtrip() {
+        let request = random_request();
+        let json = serde_json::to_string(&request).expect("serialize");
+        let recovered: CredentialRequest = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(request.to_bytes(), recovered.to_bytes());
+    }
+
+    #[test]
+    fn server_public_key_json_roundtrip() {
+        let pk = ServerPublicKey {
+            x0: ProjectivePoint::GENERATOR,
+            x1: ProjectivePoint::GENERATOR * Scalar::random(&mut OsRng),
+            x2: ProjectivePoint::GENERATOR * Scalar::random(&mut OsRng),
+        };
+        let json = serde_json::to_string(&pk).expect("serialize");
+        let recovered: ServerPublicKey = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(pk.to_bytes(), recovered.to_bytes());
+    }
+
+    #[test]
+    fn credential_json_roundtrip() {
+        let cred = Credential {
+            m1: Scalar::random(&mut OsRng),
+            u: ProjectivePoint::GENERATOR * Scalar::random(&mut OsRng),
+            u_prime: ProjectivePoint::GENERATOR * Scalar::random(&mut OsRng),
+            x1: ProjectivePoint::GENERATOR * Scalar::random(&mut OsRng),
+        };
+        let json = serde_json::to_string(&cred).expect("serialize");
+        let recovered: Credential = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(cred.to_bytes(), recovered.to_bytes());
+    }
+
+    #[test]
+    fn serde_matches_wire_format_for_request_proof() {
+        let proof = RequestProof {
+            challenge: Scalar::random(&mut OsRng),
+            responses: std::array::from_fn(|_| Scalar::random(&mut OsRng)),
+        };
+        let json = serde_json::to_string(&proof).expect("serialize");
+        let recovered: RequestProof = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(proof.to_bytes(), recovered.to_bytes());
     }
 }
