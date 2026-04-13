@@ -166,6 +166,8 @@ fn credential_finalization() {
         x1: pk_x1,
     };
     assert_point_eq(&expected.u_prime, CRED_U_PRIME);
+    assert_point_eq(&expected.u, RESP_U);
+    assert_point_eq(&expected.x1, PK_X1);
 }
 
 /// Full issuance flow using test vector scalars via `from_scalars`.
